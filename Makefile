@@ -24,7 +24,7 @@ clean: clean-test
 
 cleanall: clean-dep clean-files clean clean-rel
 
-test: eunit ct
+test: eunit rel ct cleanall
 
 xref:
 	@echo "=================== Xref =============================="
