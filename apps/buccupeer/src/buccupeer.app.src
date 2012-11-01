@@ -1,0 +1,15 @@
+{application, buccupeer,
+ [
+  {description, "Backup buccaneer: local backup to usb drive service"},
+  {vsn, git},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib,
+                  compiler,
+                  syntax_tools,
+                  lager
+                 ]},
+  {mod, { buccupeer_app, []}},
+  {env, []}
+ ]}.

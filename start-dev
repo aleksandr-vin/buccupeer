@@ -1,0 +1,9 @@
+#!/bin/bash
+
+NODE='buccupeer-dev@localhost'
+
+erl -sname ${NODE} -pz deps/*/ebin -pz apps/*/ebin \
+    -config start-dev \
+    -s lager \
+    -s reloader \
+    -s buccupeer

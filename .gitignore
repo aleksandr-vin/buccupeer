@@ -1,6 +1,8 @@
 .eunit
 deps
 priv
+log
+*.log
 *.o
 *.beam
 *.plt
