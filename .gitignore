@@ -2,6 +2,7 @@
 deps
 priv
 log
+ebin
 *.log
 *.o
 *.beam

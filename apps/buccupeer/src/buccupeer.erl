@@ -9,6 +9,9 @@
 
 app_deps() ->
     [compiler,
+     crypto,
+     ranch,
+     cowboy,
      buccupeer].
 
 start() ->
