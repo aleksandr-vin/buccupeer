@@ -15,7 +15,7 @@ content_types_provided(Req, State) ->
 	], Req, State}.
 
 to_html(Req, State) ->
-	Content = content(),
+	Content = xml:gen(content()),
 	{Content, Req, State}.
 
 %% =========================================================
@@ -23,4 +23,9 @@ to_html(Req, State) ->
 %% =========================================================
 
 content() ->
-    <<"<html><body><h1>Write HTML here!</h1></body></html>">>.
+    [html,
+     [head,
+      [{meta, [{charset, "utf-8"}]}],
+      [title, <<"REST Hello World!">>]],
+     [body,
+      [p, <<"REST Hello World as HTML!">>]]].
