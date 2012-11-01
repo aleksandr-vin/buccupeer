@@ -3,6 +3,8 @@ deps
 priv
 log
 ebin
+*.dump
+*~
 *.log
 *.o
 *.beam
