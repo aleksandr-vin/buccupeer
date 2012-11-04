@@ -68,17 +68,23 @@ element(P, Element, Type) ->
 element_name(P, {N, _}) ->
     element_name(P, N);
 element_name(P, N) ->
-    print(P, "~p", [N]).
+    print(P, "~s", [norm_atom(N)]).
 
 element_args(P, {_, A}) ->
     lists:foldl(fun ({Name, Value}, PAcc) ->
-			print(PAcc, " ~p=\"~s\"", [Name, to_string(Value)]);
+			print(PAcc, " ~s=\"~s\"", [norm_atom(Name), to_string(Value)]);
 		    (Name, PAcc) ->
-			print(PAcc, " ~p", [Name])
+			print(PAcc, " ~s", [norm_atom(Name)])
 		end,
 		P, A);
 element_args(P, _) ->
     P.
+
+norm_atom(A) when is_atom(A) ->
+    case erlang:atom_to_list(A) of
+	[$'|T] -> T -- "'";
+	S -> S
+    end.
 
 to_string(V) when is_integer(V) -> erlang:integer_to_string(V);
 to_string(V) when is_binary(V) -> erlang:binary_to_list(V);
@@ -107,4 +113,10 @@ gen_test_() ->
 	      [{a, [{b, "foo"}]},
 	       <<"Some binary text!">>]}],
     
+    [{V, ?_assertEqual(V, gen(R))} || {V, R} <- Tests].
+
+special_atoms_test_() ->
+    Tests = [{<<"<div />">>,
+	     ['div']}],
+
     [{V, ?_assertEqual(V, gen(R))} || {V, R} <- Tests].
