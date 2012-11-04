@@ -26,6 +26,22 @@ content() ->
     [html,
      [head,
       [{meta, [{charset, "utf-8"}]}],
-      [title, <<"REST Hello World!">>]],
+      [title, <<"Buccupeer: локальный бэкап файлов на внешний USB диск">>],
+      [{link, [{href, "static/buccupeer.css"}, {media,"screen"},
+	       {rel,"stylesheet"}, {type,"text/css"}]}]],
      [body,
-      [p, <<"REST Hello World as HTML!">>]]].
+      [h1, <<"Buccupeer: локальный бэкап файлов на внешний USB диск">>],
+      [hr],
+      [h2, <<"Настройки">>],
+      configuration(),
+      [hr],
+      [h2, <<"Лог">>],
+      log()]].
+
+configuration() ->
+    [{'div', [{id, configuration}]},
+     <<"Здесь будут настройки">>].
+
+log() ->
+    [{'div', [{id, log}]},
+     <<"Здесь будут ссылки на лог-файлы">>].

@@ -15,7 +15,10 @@
 start(_StartType, _StartArgs) ->
     Dispatch = [
 		%% {URIHost, list({URIPath, Handler, Opts})}
-		{'_', [
+		{'_', [{[<<"static">>, '...'], cowboy_static,
+			[{directory, {priv_dir, buccupeer, [<<"www">>]}},
+			 {mimetypes, [{<<".css">>, [<<"text/css">>]},
+				      {<<".js">>, [<<"application/javascript">>]}]}]},
 		       {'_', buccupeer_handler, []}]}
 	       ],
 

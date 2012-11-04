@@ -1,6 +1,5 @@
 .eunit
 deps
-priv
 log
 ebin
 *.dump
