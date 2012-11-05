@@ -3,11 +3,26 @@
 -module(buccupeer_handler).
 
 -export([init/3]).
--export([content_types_provided/2]).
+-export([content_types_provided/2, resource_exists/2, rest_init/2]).
 -export([to_html/2]).
+
+-include("log.hrl").
+
+-record(state, {drives_info = []}).
+
+-opaque state() :: #state{}.
+-export_type([state/0]).
 
 init(_Transport, _Req, []) ->
 	{upgrade, protocol, cowboy_rest}.
+
+rest_init(Req, _Opts) ->
+    {ok, Req, #state{}}.
+
+resource_exists(Req, State) ->
+    {Req, DrivesInfo} = drives_info(Req),
+    State2 = State#state{drives_info = DrivesInfo},
+    {true, Req, State2}.
 
 content_types_provided(Req, State) ->
 	{[
@@ -15,14 +30,15 @@ content_types_provided(Req, State) ->
 	], Req, State}.
 
 to_html(Req, State) ->
-	Content = xml:gen(content()),
+	Content = xml:gen(content(State)),
 	{Content, Req, State}.
 
 %% =========================================================
 %% Internals
 %% =========================================================
 
-content() ->
+-spec content(state()) -> xml:tree().
+content(State) ->
     [html,
      [head,
       [{meta, [{charset, "utf-8"}]}],
@@ -33,15 +49,61 @@ content() ->
       [h1, <<"Buccupeer: локальный бэкап файлов на внешний USB диск">>],
       [hr],
       [h2, <<"Настройки">>],
-      configuration(),
+      configuration(State),
       [hr],
       [h2, <<"Лог">>],
-      log()]].
+      log(State)]].
 
-configuration() ->
+-spec configuration(state()) -> xml:tree().
+configuration(State) ->
     [{'div', [{id, configuration}]},
-     <<"Здесь будут настройки">>].
+     [h3, <<"Доступные диски:">>],
+     [ul] ++
+      lists:map(fun ({DriveLetter, DriveInfo}) ->
+			[li |
+			 case DriveInfo of
+			     undefined ->
+				 [[{a, [{href, "link-showing-DriveLetter-info"}]},
+				   DriveLetter]];
+			     _ ->
+				 [[{a, [{href, "link-closing-DriveLetter-info"}]},
+				   DriveLetter],
+				  markup(drive_info, DriveInfo)]
+			 end]
+		end,
+		lists:keysort(1, State#state.drives_info))].
 
-log() ->
+-spec log(state()) -> xml:tree().
+log(_) ->
     [{'div', [{id, log}]},
      <<"Здесь будут ссылки на лог-файлы">>].
+
+-type drive_info() :: term().
+
+%% Finds drives available now, and lists info on ones selected by user.
+%% Silently skips unavailable but user selected drives.
+-spec drives_info(Req :: cowboy_req:req()) ->
+			 {cowboy_req:req(),
+			  Drives :: [{string(), drive_info() | undefined}]}.
+drives_info(Req) ->
+    Fake = {Req,
+	    [{"H:", undefined},
+	     {"Z:", [{note, "My homework backup"},
+		     {backup, [{src, "C:/some-file"},
+			       {copies, 31}]}]}]},
+    ?warning("Not implemented, fake value: ~p", [Fake]),
+    Fake.
+
+%% Markup code fragments
+-spec markup(Section :: atom(), Data :: term()) -> xml:tree().
+markup(drive_info, Props) ->
+    PropsMap = [{note, <<"Заметка">>}],
+    [{'div', [{class, "drive_info"}]}] ++
+	[
+	 ['div',
+	  [{'div', [{class, "property_name"}]},
+	   TextName],
+	  <<":&nbsp;">>,
+	  [{'div', [{class, "property_value"}]},
+	   proplists:get_value(Name, Props)]]
+	 || {Name, TextName} <- PropsMap].

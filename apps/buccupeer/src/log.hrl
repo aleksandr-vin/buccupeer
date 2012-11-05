@@ -12,4 +12,7 @@
 -define(error(F, A), lager:error(F, A)).
 -define(error(F), lager:error(F)).
 
+-define(warning(F, A), lager:warning(F, A)).
+-define(warning(F), lager:warning(F)).
+
 -endif.
