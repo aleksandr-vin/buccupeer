@@ -25,5 +25,6 @@ start_link() ->
 
 init([]) ->
     {ok, { {one_for_one, 5, 10},
-	   [?CHILD(buccupeer_srv, worker)]} }.
+	   [?CHILD(buccupeer_srv, worker),
+	    ?CHILD(growl, worker)]} }.
 
