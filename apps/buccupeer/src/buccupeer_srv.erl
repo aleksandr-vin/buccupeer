@@ -11,7 +11,8 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/0, list_disks/0, add_job/1, remove_job/1]).
+-export([start_link/0, list_disks/0, add_job/1, remove_job/1,
+	 run_jobs/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -22,6 +23,9 @@
 -define(SERVER, ?MODULE). 
 
 -record(state, {}).
+
+-record(job_run_state, {src, dest, copies,
+			backup_dir}).
 
 -type disk_name() :: string().
 
@@ -38,6 +42,13 @@
 -type job_opt() :: {src, file:filename()} |
 		   {dest, file:filename()} |
 		   {copies, integer()}.
+
+-type job_report() :: {job_ref(),
+		       ok,
+		       Info :: any()} |
+		      {job_ref(),
+		       {error, Error :: any()},
+		       Info :: any()}.
 
 -type removed_jobs_on_disk() :: {disk_name(), [job()]}.
 
@@ -95,6 +106,18 @@ add_job(Opts) ->
 			       {error, Error :: any()}.
 remove_job(JobRef) ->
     gen_server:call(?SERVER, {remove_job, JobRef}).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Run jobs on disk if available
+%%
+%% @end
+%%--------------------------------------------------------------------
+-spec run_jobs(disk_name()) -> [job_report()] |
+			       'not-found' |
+			       {error, Error :: any()}.
+run_jobs(DiskName) ->
+    gen_server:call(?SERVER, {run_job, DiskName}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -185,6 +208,22 @@ handle_call({remove_job, JobRef}, _From, State) ->
 		[] -> 'not-found';
 		List -> List
 	    end,
+    {reply, Reply, State};
+
+handle_call({run_job, DiskName}, _From, State) ->
+    ?debug("Trying to run jobs on disk ~s", [DiskName]),
+    Reply =
+	case read_disk_info(DiskName) of
+	    undefined ->
+		?info("No disk info found for ~s", [DiskName]);
+	    {error, Why1} = E ->
+		?error("Can't read current disk info for ~s: ~p", [DiskName, Why1]),
+		E;
+	    DiskInfo ->
+		?info("Disk info found for ~s", [DiskName]),
+		?debug("Disk info: ~p", [DiskInfo]),
+		run_jobs_by_disk_info(DiskInfo)
+	end,
     {reply, Reply, State};
 
 handle_call(_Request, _From, State) ->
@@ -410,3 +449,64 @@ find_and_remove_job(DiskName, JobRef) ->
 		    end
 	    end
     end.
+
+-spec run_jobs_by_disk_info(disk_info()) -> [job_report()] |
+					    {error, Error :: any()}.
+run_jobs_by_disk_info(DiskInfo) ->
+    true = is_disk_info(DiskInfo),
+    [_, DIOpts] = DiskInfo,
+    Jobs0 = proplists:get_value(jobs, DIOpts),
+    Jobs = normalize_jobs(Jobs0),
+    lists:map(fun run_job/1, Jobs).
+
+run_job(Job) ->
+    ?debug("Running job: ~p", [Job]),
+    [Src, Dest, Copies] =
+	lists:map(fun (N) ->
+			  proplists:get_value(N, Job)
+		  end,
+		  [src, dest, copies]),
+    State = #job_run_state{src = Src, dest = Dest, copies = Copies},
+    case run_job(State, 'base-dest') of
+	{error, _} = E ->
+	    {make_job_ref(Job), E, []};
+	{Other, Info} ->
+	    {make_job_ref(Job), Other, Info}
+    end.
+
+run_job(State, 'base-dest') ->
+    BaseDest = State#job_run_state.dest,
+    case filelib:ensure_dir(BaseDest) of
+	{error, _} = E ->
+	    {E, 'base-dest-dir-error'};
+	ok ->
+	    ?debug("Base destination directory exists: ~p", [BaseDest]),
+	    run_job(State, 'backup-dir')
+    end;
+
+run_job(State0, 'backup-dir') ->
+    {BackupDir, State1} = backup_dir(State0),
+    case filelib:ensure_dir(BackupDir) of
+	{error, _} = E ->
+	    {E, 'backup-dir-error'};
+	ok ->
+	    ?debug("Backup destination directory exists: ~p", [BackupDir]),
+	    run_job(State1, 'roll-copies')
+    end;
+
+run_job(State0, 'roll-copies') ->
+    {BackupDir, State1} = backup_dir(State0),
+    ExistentCopies =
+	filelib:fold_files(BackupDir, "copy-*", false,
+			   fun (F, AccIn) ->
+				   [F|AccIn]
+			   end,
+			   []),
+    ?debug("~p backup copies found", [length(ExistentCopies)]),
+    {ok, {'copies-exists', ExistentCopies}}.
+
+backup_dir(State0) ->
+    Last = hd(lists:reverse(filename:split(State0#job_run_state.src))),
+    Path = filename:join([State0#job_run_state.dest, Last])
+	++ "/",
+    {Path, State0#job_run_state{backup_dir = Path}}.
