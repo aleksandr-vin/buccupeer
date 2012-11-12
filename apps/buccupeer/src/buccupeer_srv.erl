@@ -23,6 +23,8 @@
 
 -record(state, {}).
 
+-type disk_name() :: string().
+
 -type disk_info_prop() :: {jobs, [job()]}.
 
 -type disk_info() :: list(). % [buccupeer_disk_info, [disk_info_prop()]].
@@ -36,6 +38,8 @@
 -type job_opt() :: {src, file:filename()} |
 		   {dest, file:filename()} |
 		   {copies, integer()}.
+
+-type removed_jobs_on_disk() :: {disk_name(), [job()]}.
 
 %%%===================================================================
 %%% API
@@ -71,7 +75,9 @@ list_disks() ->
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec add_job(Opts :: job_opts()) -> job_ref() | {error, Error :: any()}.
+-spec add_job(Opts :: job_opts()) -> {ok, job_ref()} |
+				     {'already-presents', job_ref()} |
+				     {error, Error :: any()}.
 add_job(Opts) ->
     gen_server:call(?SERVER, {add_job, Opts}).
 
@@ -84,9 +90,11 @@ add_job(Opts) ->
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec remove_job(job_ref()) -> job_opts() | {error, Error :: any()}.
-remove_job(_JobRef) ->
-    {error, 'not-implemented'}.
+-spec remove_job(job_ref()) -> [removed_jobs_on_disk()] |
+			       'not-found' |
+			       {error, Error :: any()}.
+remove_job(JobRef) ->
+    gen_server:call(?SERVER, {remove_job, JobRef}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -121,7 +129,7 @@ init([]) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_call({add_job, Opts}, _From, State) ->
-    Reply = {job, make_ref()},
+    ?debug("Adding job ~p", [Opts]),
     case disk_name(Opts) of
 	undefined ->
 	    {reply, {error, 'disk-name-undefined'}, State};
@@ -137,17 +145,47 @@ handle_call({add_job, Opts}, _From, State) ->
 			new_disk_info(Opts);
 		    DiskInfo0 ->
 			?info("Disk info found for ~s", [DiskName]),
+			?debug("Current disk info: ~p", [DiskInfo0]),
 			DiskInfo0
 		end,
-	    DiskInfo2 = merge_disk_info(DiskInfo1, Opts),
-	    case write_disk_info(DiskName, DiskInfo2) of
-		{error, Why2} = E ->
-		    ?error("Can't write new disk info for ~s: ~p", [DiskName, Why2]),
-		    {reply, E, State};
-		ok ->
-		    {reply, Reply, State}
+	    case merge_disk_info(DiskInfo1, Opts) of
+		{ok, DiskInfo2} ->
+		    case write_disk_info(DiskName, DiskInfo2) of
+			{error, Why2} = E ->
+			    ?error("Can't write new disk info for ~s: ~p", [DiskName, Why2]),
+			    {reply, E, State};
+			ok ->
+			    JobRef = make_job_ref(Opts),
+			    ?info("New job ~p: ~p", [JobRef, Opts]),
+			    {reply, {ok, JobRef}, State}
+		    end;
+		'not-needed' ->
+		    JobRef = make_job_ref(Opts),
+		    ?info("Job ~p: ~p", [JobRef, Opts]),
+		    {reply, {'already-presents', JobRef}, State};
+		{error, Why3} = E->
+		    ?error("Can't merge disk infos: ~p", [Why3]),
+		    {reply, E, State}
 	    end
     end;
+
+handle_call({remove_job, JobRef}, _From, State) ->
+    ?debug("Removing job ~p", [JobRef]),
+    Disks = list_disks(),
+    Result = lists:map(fun ({DiskName, _}) ->
+			       case find_and_remove_job(DiskName, JobRef) of
+				   false ->
+				       {false, DiskName};
+				   RemovedJobs ->
+				       {true, {DiskName, RemovedJobs}}
+			       end
+		       end,
+		       Disks),
+    Reply = case proplists:get_all_values(true, Result) of
+		[] -> 'not-found';
+		List -> List
+	    end,
+    {reply, Reply, State};
 
 handle_call(_Request, _From, State) ->
     Reply = ok,
@@ -255,29 +293,74 @@ write_disk_info(DiskName, DiskInfo) ->
 		     DiskInfo),
     file:write_file(MetaFile, Data, []).
 
+
+-spec merge_disk_info(disk_info(), job()) -> 'not-needed' |
+					     {ok, NewDiskInfo :: disk_info()} |
+					     {error, Error :: any()}.
 merge_disk_info(DiskInfo0, Opts0) ->
-    case DiskInfo0 of
-	[buccupeer_disk_info, DIOpts1] ->
-	    Jobs0 = proplists:get_value(jobs, DIOpts1),
-	    JobsSet0 = sets:from_list(lists:map(fun (L) ->
-							lists:keysort(1, L)
-						end,
-						Jobs0)),
-	    Opts1 = lists:keysort(1, Opts0),
-	    case sets:is_element(Opts1, JobsSet0) of
-		true ->
-		    ?warning("No merge of disk info needed"),
-		    DiskInfo0;
-		false ->
-		    JobsSet1 = sets:add_element(Opts1, JobsSet0),
-		    ?info("New job added during merge"),
-		    Jobs1 = sets:to_list(JobsSet1),
-		    DIOpts2 = [{jobs, Jobs1} | proplists:delete(jobs, DIOpts1)],
-		    [buccupeer_disk_info, DIOpts2]
-	    end;
-	_ ->
-	    {error, 'unknown-disk-info'}
+    true = is_disk_info(DiskInfo0),
+    [_, DIOpts1] = DiskInfo0,
+    Jobs00 = proplists:get_value(jobs, DIOpts1),
+    Jobs0 = normalize_jobs(Jobs00),
+    JobsSet0 = sets:from_list(lists:map(fun (L) ->
+						lists:keysort(1, L)
+					end,
+					Jobs0)),
+    Opts1 = lists:keysort(1, Opts0),
+    case sets:is_element(Opts1, JobsSet0) of
+	true ->
+	    ?warning("No merge of disk info needed"),
+	    'not-needed';
+	false ->
+	    JobsSet1 = sets:add_element(Opts1, JobsSet0),
+	    ?info("New job added during merge"),
+	    Jobs1 = sets:to_list(JobsSet1),
+	    DIOpts2 = [{jobs, Jobs1} | proplists:delete(jobs, DIOpts1)],
+	    {ok, [buccupeer_disk_info, DIOpts2]}
     end.
+
+-spec remove_job(disk_info(), job_ref()) -> 'not-found' |
+					    {ok,
+					     NewDiskInfo :: disk_info(),
+					     RemovedJobs :: [job()]} |
+					    {error, Error :: any()}.
+remove_job(DiskInfo0, JobRef) ->
+    true = is_disk_info(DiskInfo0),
+    [_, DIOpts1] = DiskInfo0,
+    Jobs00 = proplists:get_value(jobs, DIOpts1),
+    Jobs0 = normalize_jobs(Jobs00),
+    {Kept,Removed} =
+	lists:foldl(fun (Job, {Kept,Removed}) ->
+			    case make_job_ref(Job) of
+				JobRef -> {Kept, [Job|Removed]};
+				_ -> {[Job|Kept], Removed}
+			    end
+		    end,
+		    {[],[]},
+		    Jobs0),
+    case {Kept,Removed} of
+	{_,[]} ->
+	    'not-found';
+	{Kept,Removed} ->
+	    ?info("Jobs removed: ~p", [Removed]),
+	    DIOpts2 = [{jobs, Kept} | proplists:delete(jobs, DIOpts1)],
+	    {ok, [buccupeer_disk_info, DIOpts2], Removed}
+    end.
+
+normalize_jobs(Jobs) ->
+    lists:map(fun normalize_job/1,
+	      Jobs).
+
+normalize_job(Opts) ->
+    case is_case_sensitive_filesystem(disk_name(Opts)) of
+	true ->
+	    Opts
+    end.
+
+is_case_sensitive_filesystem(_) ->
+    %% Not implemented, that's why
+    %% any filesystem is case sensitive for now
+    true.
 
 is_disk_info(Terms) ->
     case Terms of
@@ -291,3 +374,39 @@ metafile(DiskName) ->
 
 metafilename() ->
     ".buccupeer".
+
+make_job_ref(Opts) ->
+    case proplists:get_value(dest, Opts) of
+	Path = [H|_] when is_integer(H) andalso
+			  0 < H andalso
+			  H < 255 ->
+	    case disk_name(Opts) of
+		undefined ->
+		    error('bad-job-opts');
+		DiskName ->
+		    {job, erlang:phash2({Path, DiskName})}
+	    end
+    end.
+
+find_and_remove_job(DiskName, JobRef) ->
+    case read_disk_info(DiskName) of
+	undefined ->
+	    false;
+	{error, _} = E ->
+	    E;
+	DiskInfo0 ->
+	    true = is_disk_info(DiskInfo0),
+	    case remove_job(DiskInfo0, JobRef) of
+		'not-found' ->
+		    false;
+		{error, _} = E ->
+		    E;
+		{ok, DiskInfo1, RemovedJobs} ->
+		    case write_disk_info(DiskName, DiskInfo1) of
+			{error, _} = E ->
+			    E;
+			ok ->
+			    RemovedJobs
+		    end
+	    end
+    end.
