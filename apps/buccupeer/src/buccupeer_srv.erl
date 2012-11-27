@@ -20,7 +20,7 @@
 
 -include("log.hrl").
 
--define(SERVER, ?MODULE). 
+-define(SERVER, ?MODULE).
 
 -record(state, {}).
 
@@ -73,9 +73,9 @@ start_link() ->
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec list_disks() -> [disk_info()] | {error, Error :: any()}.
+-spec list_disks() -> [{disk_name(), disk_info()}] | {error, Error :: any()}.
 list_disks() ->
-    [{"H:", []}].
+    gen_server:call(?SERVER, list_disks).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -151,6 +151,36 @@ init([]) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_call(list_disks, _From, State) ->
+    ?debug("Listing disks", []),
+    Disks = list_disks_names(),
+    Result = lists:map(fun (DiskName) ->
+                               case read_disk_info(DiskName) of
+                                   undefined ->
+                                       ?debug("No disk info found for '~s'", [DiskName]),
+                                       {false, DiskName};
+                                   {error, enoent} = E ->
+                                       ?debug("Can't read current disk info for '~s', "
+                                              "skipping enoent error, "
+                                              "assuming no drive attached",
+                                              [DiskName]),
+                                       {E, DiskName};
+                                   {error, Why1} = E ->
+                                       ?error("Can't read current disk info for '~s': ~p",
+                                              [DiskName, Why1]),
+                                       {E, DiskName};
+                                   DiskInfo ->
+                                       ?info("Disk info found for '~s'", [DiskName]),
+                                       ?debug("Disk info: ~p", [DiskInfo]),
+                                       {true, {DiskName, DiskInfo}}
+                               end
+		       end,
+		       Disks),
+    Reply = case proplists:get_all_values(true, Result) of
+		[] -> 'not-found';
+		List -> List
+	    end,
+    {reply, Reply, State};
 handle_call({add_job, Opts}, _From, State) ->
     ?debug("Adding job ~p", [Opts]),
     case disk_name(Opts) of
@@ -194,8 +224,8 @@ handle_call({add_job, Opts}, _From, State) ->
 
 handle_call({remove_job, JobRef}, _From, State) ->
     ?debug("Removing job ~p", [JobRef]),
-    Disks = list_disks(),
-    Result = lists:map(fun ({DiskName, _}) ->
+    Disks = list_disks_names(),
+    Result = lists:map(fun (DiskName) ->
 			       case find_and_remove_job(DiskName, JobRef) of
 				   false ->
 				       {false, DiskName};
@@ -215,13 +245,13 @@ handle_call({run_job, DiskName}, _From, State) ->
     Reply =
 	case read_disk_info(DiskName) of
 	    undefined ->
-		?info("No disk info found for ~s", [DiskName]);
+		?info("No disk info found for '~s'", [DiskName]);
 	    {error, Why1} = E ->
-		?error("Can't read current disk info for ~s: ~p", [DiskName, Why1]),
+		?error("Can't read current disk info for '~s': ~p", [DiskName, Why1]),
 		E;
 	    DiskInfo ->
-		?info("Disk info found for ~s", [DiskName]),
-		?debug("Disk info: ~p", [DiskInfo]),
+		?info("Disk info found for '~s'", [DiskName]),
+		?debug("Disk info: '~p'", [DiskInfo]),
 		run_jobs_by_disk_info(DiskInfo)
 	end,
     {reply, Reply, State};
@@ -285,7 +315,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-%% Return disk name of the 'dest' path of the job opts 
+%% Return disk name of the 'dest' path of the job opts
 -spec disk_name(job_opts()) -> string() | undefined.
 disk_name(Opts) ->
     case proplists:get_value(dest, Opts) of
@@ -510,3 +540,22 @@ backup_dir(State0) ->
     Path = filename:join([State0#job_run_state.dest, Last])
 	++ "/",
     {Path, State0#job_run_state{backup_dir = Path}}.
+
+
+list_disks_names() ->
+    {ok, RH} = win32reg:open([read]),
+    Result =
+        try
+            ok = win32reg:change_key(RH, "\\hklm\\SYSTEM\\MountedDevices"),
+            list_disks_names(RH)
+        after
+            ok = win32reg:close(RH)
+        end,
+    Result.
+
+list_disks_names(RegHandle) ->
+    {ok, Values} = win32reg:values(RegHandle),
+    lists:foldl(fun match_reg_value/2, [], Values).
+
+match_reg_value({"\\DosDevices\\" ++ DiskName, _Value}, Acc) -> [DiskName | Acc];
+match_reg_value(_, Acc) -> Acc.

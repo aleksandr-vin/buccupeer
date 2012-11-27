@@ -8,7 +8,8 @@
                   stdlib,
                   compiler,
                   syntax_tools,
-                  lager
+                  lager,
+                  winmeserl
                  ]},
   {mod, { buccupeer_app, []}},
   {env, []}

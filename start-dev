@@ -6,4 +6,5 @@ erl -sname ${NODE} -pz deps/*/ebin -pz apps/*/ebin \
     -config start-dev \
     -s lager \
     -s sync go \
+    -s winmeserl \
     -s buccupeer

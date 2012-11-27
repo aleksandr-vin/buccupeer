@@ -7,13 +7,6 @@
 %% Application callbacks
 %% ===================================================================
 
-app_deps() ->
-    [compiler,
-     crypto,
-     ranch,
-     cowboy,
-     buccupeer].
-
 start() ->
     ok = lists:foreach(fun application:start/1,
 		       app_deps()).
@@ -21,3 +14,15 @@ start() ->
 stop() ->
     ok = lists:foreach(fun application:stop/1,
 		       lists:reverse(app_deps())).
+
+%% ===================================================================
+%% Internals
+%% ===================================================================
+
+app_deps() ->
+    [compiler,
+     crypto,
+     ranch,
+     cowboy,
+     winmeserl,
+     buccupeer].
