@@ -24,7 +24,8 @@
 
 -record(state, {}).
 
--record(job_run_state, {src, dest, copies,
+-record(job_run_state, {disk_name,
+                        src, dest, copies,
 			backup_dir}).
 
 -type disk_name() :: string().
@@ -252,7 +253,7 @@ handle_call({run_job, DiskName}, _From, State) ->
 	    DiskInfo ->
 		?info("Disk info found for '~s'", [DiskName]),
 		?debug("Disk info: '~p'", [DiskInfo]),
-		run_jobs_by_disk_info(DiskInfo)
+		run_jobs_by_disk_info(DiskName, DiskInfo)
 	end,
     {reply, Reply, State};
 
@@ -480,38 +481,38 @@ find_and_remove_job(DiskName, JobRef) ->
 	    end
     end.
 
--spec run_jobs_by_disk_info(disk_info()) -> [job_report()] |
-					    {error, Error :: any()}.
-run_jobs_by_disk_info(DiskInfo) ->
+-spec run_jobs_by_disk_info(disk_name(), disk_info()) -> [job_report()] |
+                                                         {error, Error :: any()}.
+run_jobs_by_disk_info(DiskName, DiskInfo) ->
     true = is_disk_info(DiskInfo),
     [_, DIOpts] = DiskInfo,
     Jobs0 = proplists:get_value(jobs, DIOpts),
     Jobs = normalize_jobs(Jobs0),
-    lists:map(fun run_job/1, Jobs).
+    lists:map(fun (Job) -> run_job(DiskName, Job) end, Jobs).
 
-run_job(Job) ->
+run_job(DiskName, Job) when is_list(DiskName) ->
     ?debug("Running job: ~p", [Job]),
     [Src, Dest, Copies] =
 	lists:map(fun (N) ->
 			  proplists:get_value(N, Job)
 		  end,
 		  [src, dest, copies]),
-    State = #job_run_state{src = Src, dest = Dest, copies = Copies},
+    State = #job_run_state{disk_name = DiskName, src = Src, dest = Dest, copies = Copies},
     case run_job(State, 'base-dest') of
 	{error, _} = E ->
 	    {make_job_ref(Job), E, []};
 	{Other, Info} ->
 	    {make_job_ref(Job), Other, Info}
-    end.
+    end;
 
-run_job(State, 'base-dest') ->
-    BaseDest = State#job_run_state.dest,
+run_job(State0, 'base-dest') ->
+    {BaseDest, State1} = base_dest_dir(State0),
     case filelib:ensure_dir(BaseDest) of
 	{error, _} = E ->
 	    {E, 'base-dest-dir-error'};
 	ok ->
 	    ?debug("Base destination directory exists: ~p", [BaseDest]),
-	    run_job(State, 'backup-dir')
+	    run_job(State1, 'backup-dir')
     end;
 
 run_job(State0, 'backup-dir') ->
@@ -521,25 +522,172 @@ run_job(State0, 'backup-dir') ->
 	    {E, 'backup-dir-error'};
 	ok ->
 	    ?debug("Backup destination directory exists: ~p", [BackupDir]),
-	    run_job(State1, 'roll-copies')
+	    run_job(State1, 'decide-to-backup')
     end;
 
-run_job(State0, 'roll-copies') ->
+run_job(State0, 'decide-to-backup') ->
+    case 'need' of
+	{error, _} = E ->
+	    {E, 'decide-to-backup-error'};
+        'not-needed' ->
+            ?debug("Decided not to backup now"),
+            {'not-needed', "Decided not to backup now"};
+	'need' ->
+	    ?debug("Decided to backup"),
+	    run_job(State0, 'rotate-copies')
+    end;
+
+run_job(State0, 'rotate-copies') ->
     {BackupDir, State1} = backup_dir(State0),
-    ExistentCopies =
-	filelib:fold_files(BackupDir, "copy-*", false,
-			   fun (F, AccIn) ->
-				   [F|AccIn]
-			   end,
-			   []),
-    ?debug("~p backup copies found", [length(ExistentCopies)]),
-    {ok, {'copies-exists', ExistentCopies}}.
+    case rotate_backupfile(BackupDir ++ "copy", State1#job_run_state.copies) of
+	{error, _} = E ->
+	    {E, 'rotate-copies-error'};
+	ok ->
+            ?debug("Backups rotated"),
+	    run_job(State1, 'new-copy')
+    end;
+
+run_job(State0, 'new-copy') ->
+    {BackupDir, State1} = backup_dir(State0),
+    Src = State0#job_run_state.src,
+    case backupfile(Src, BackupDir ++ "copy") of
+	{error, _} = E ->
+	    {E, 'new-copy-error'};
+	{ok, BytesCopied} ->
+            ?debug("New copy saved (~p bytes)", [BytesCopied]),
+	    run_job(State1, 'commit')
+    end;
+
+run_job(_State0, NotImplemented) ->
+    {ok, {'not-implemented', NotImplemented}}.
+
+base_dest_dir(State0) ->
+    DiskName = State0#job_run_state.disk_name,
+    Dest0 = filename:split(State0#job_run_state.dest),
+    Path = [DiskName,
+            case filename:pathtype(Dest0) of
+                volumerelative ->
+                    filename:join([Dest0]);
+                relative ->
+                    ["/", filename:join([Dest0])];
+                absolute ->
+                    ["/", tl(filename:split(Dest0))]
+            end,
+            "/"],
+    Dest1 = lists:flatten(Path),
+    {Dest1, State0#job_run_state{dest = Dest1}}.
 
 backup_dir(State0) ->
     Last = hd(lists:reverse(filename:split(State0#job_run_state.src))),
     Path = filename:join([State0#job_run_state.dest, Last])
 	++ "/",
     {Path, State0#job_run_state{backup_dir = Path}}.
+
+%% renames and deletes failing are OK
+rotate_backupfile(File, 0) ->
+    delete_file_or_dir(File);
+rotate_backupfile(File, 1) ->
+    _Result = rename_dir(File, File++".0"),
+    ?debug("Renaming on rotate: ~p", [_Result]),
+    rotate_backupfile(File, 0);
+rotate_backupfile(File, Count) ->
+    _Result = rename_dir(File ++ "." ++ integer_to_list(Count - 2), File ++ "." ++
+        integer_to_list(Count - 1)),
+    ?debug("Renaming on rotate: ~p", [_Result]),
+    rotate_backupfile(File, Count - 1).
+
+rename_dir(Src, Dest) ->
+    ok = delete_file_or_dir(Dest),
+    file:rename(Src, Dest).
+
+delete_file_or_dir(File) ->
+    case file:delete(File) of
+        ok ->
+            ok;
+        {error, enoent} ->
+            ok;
+        {error, eperm} ->
+            case recursive_delete(File) of
+                {ok, _Path} ->
+                    ok;
+                Other -> Other
+            end;
+        Other -> Other
+    end.
+
+backupfile(Src, Dest) ->
+    case file:copy(Src, Dest) of
+        {error, eisdir} ->
+            backupdir(Src, Dest);
+        Other -> Other
+    end.
+
+backupdir(Src, Dest) ->
+    case recursive_copy(Src, Dest) of
+        {Result, _From} ->
+            Result;
+        Other -> Other
+    end.
+
+%% Recursively copy directories
+-spec recursive_copy(list(), list()) -> ok.
+recursive_copy(From, To) ->
+    {ok, Files} = file:list_dir(From),
+    Log = [rec_copy(From, To, X) || X <- Files],
+    BytesTotal =
+        lists:foldl(fun ({{ok, V}, _Name}, Acc) when is_integer(V) ->
+                            ?debug("Copied ~p bytes: ~p", [V, _Name]),
+                            V + Acc;
+                        ({_Reason, _Name}, Acc) ->
+                            ?debug("Not copied (~p): ~p ", [_Reason, _Name]),
+                            Acc
+                    end,
+                    0,
+                    Log),
+    {{ok, BytesTotal}, From}.
+
+-spec rec_copy(list(), list(), list()) -> {ok, list()} | {skipped, list()}.
+rec_copy(From, To, File) ->
+    NewFrom = filename:join(From, File),
+    NewTo   = filename:join(To, File),
+    case filelib:is_dir(NewFrom) of
+        true  ->
+            ok = filelib:ensure_dir(NewTo),
+            recursive_copy(NewFrom, NewTo);
+        false ->
+            case filelib:is_file(NewFrom) of
+                true  ->
+                    ok = filelib:ensure_dir(NewTo),
+                    {file:copy(NewFrom, NewTo), NewFrom};
+                false ->
+                    {skipped, NewFrom}
+            end
+    end.
+
+%% Recursively delete directories
+-spec recursive_delete(list()) -> ok.
+recursive_delete(From) ->
+    {ok, Files} = file:list_dir(From),
+    Log = [rec_delete(From, X) || X <- Files],
+    ?debug("Recursive deletion result: ~p", [Log]),
+    {file:del_dir(From), From}.
+
+-spec rec_delete(list(), list()) -> {ok, list()} |
+                                    {skipped, list()} |
+                                    {{error, any()}, list()}.
+rec_delete(From, File) ->
+    NewFrom = filename:join(From, File),
+    case filelib:is_dir(NewFrom) of
+        true  ->
+            recursive_delete(NewFrom);
+        false ->
+            case filelib:is_file(NewFrom) of
+                true  ->
+                    {file:delete(NewFrom), NewFrom};
+                false ->
+                    {skipped, NewFrom}
+            end
+    end.
 
 
 list_disks_names() ->
