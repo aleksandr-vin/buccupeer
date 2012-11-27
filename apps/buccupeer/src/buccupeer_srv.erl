@@ -177,10 +177,7 @@ handle_call(list_disks, _From, State) ->
                                end
 		       end,
 		       Disks),
-    Reply = case proplists:get_all_values(true, Result) of
-		[] -> 'not-found';
-		List -> List
-	    end,
+    Reply = proplists:get_all_values(true, Result),
     {reply, Reply, State};
 handle_call({add_job, Opts}, _From, State) ->
     ?debug("Adding job ~p", [Opts]),
@@ -526,15 +523,15 @@ run_job(State0, 'backup-dir') ->
     end;
 
 run_job(State0, 'decide-to-backup') ->
-    case 'need' of
-	{error, _} = E ->
+    case is_backup_needed(State0) of
+	{{error, _} = E, _State1} ->
 	    {E, 'decide-to-backup-error'};
-        'not-needed' ->
+        {'not-needed', _State1} ->
             ?debug("Decided not to backup now"),
             {'not-needed', "Decided not to backup now"};
-	'need' ->
+	{'needed', State1} ->
 	    ?debug("Decided to backup"),
-	    run_job(State0, 'rotate-copies')
+	    run_job(State1, 'rotate-copies')
     end;
 
 run_job(State0, 'rotate-copies') ->
@@ -548,15 +545,18 @@ run_job(State0, 'rotate-copies') ->
     end;
 
 run_job(State0, 'new-copy') ->
-    {BackupDir, State1} = backup_dir(State0),
+    {BackupName, State1} = backup_name(State0),
     Src = State0#job_run_state.src,
-    case backupfile(Src, BackupDir ++ "copy") of
+    case backupfile(Src, BackupName) of
 	{error, _} = E ->
 	    {E, 'new-copy-error'};
 	{ok, BytesCopied} ->
             ?debug("New copy saved (~p bytes)", [BytesCopied]),
 	    run_job(State1, 'commit')
     end;
+
+run_job(_State0, 'commit') ->
+    {ok, 'complete'};
 
 run_job(_State0, NotImplemented) ->
     {ok, {'not-implemented', NotImplemented}}.
@@ -582,6 +582,109 @@ backup_dir(State0) ->
     Path = filename:join([State0#job_run_state.dest, Last])
 	++ "/",
     {Path, State0#job_run_state{backup_dir = Path}}.
+
+backup_name(State0) ->
+    {BackupDir, State1} = backup_dir(State0),
+    {BackupDir ++ "copy", State1}.
+
+is_backup_needed(State0) ->
+    Src = State0#job_run_state.src,
+    case most_last_modified(Src) of
+	undefined ->
+	    ?warning("Source path not found: ~p", [Src]),
+	    {'not-needed', State0};
+	SrcMostLastModTime ->
+	    {BackupName, State1} = backup_name(State0),
+	    case most_last_modified(BackupName) of
+		undefined ->
+		    ?info("No latest backups found on ~p", [BackupName]),
+		    {'needed', State1};
+		LastBackupMostLastModTime ->
+		    case calendar:time_difference(LastBackupMostLastModTime,
+						  SrcMostLastModTime) of
+			{D, _} when D < 0 ->
+			    ?info("No modification time differences found "
+				  "between source and last backup"),
+			    {'not-needed', State1};
+			_ ->
+			    ?info("Modification time differences found "
+				  "between source and last backup"),
+			    {'needed', State1}
+		    end
+	    end
+    end.
+
+most_last_modified(Path) ->
+    Times =
+	fold_files(Path,
+		   fun (point, file, Name, Acc) ->
+%%			   ?debug(">>>> point file: ~p", [Name]),
+			   [{filelib:last_modified(Name), Name}|Acc];
+		       (open, dir, Name, Acc) ->
+%%			   ?debug(">>>> open dir: ~p", [Name]),
+			   [{filelib:last_modified(Name), Name}|Acc];
+		       (close, dir, _Name, Acc) ->
+%%			   ?debug(">>>> close dir: ~p", [_Name]),
+			   Acc;
+		       (point, other, _Name, Acc) ->
+			   ?debug(">>>> point other: ~p", [_Name]),
+			   Acc
+		   end,
+		   []),
+    case length(Times) of
+	0 -> undefined;
+	_ ->
+	    lists:foldl(fun ({TimeA, _}, TimeB) ->
+				case calendar:time_difference(TimeA, TimeB) of
+				    {D, _} when D < 0 -> TimeA;
+				    _ -> TimeB
+				end
+			end,
+			element(1, hd(Times)),
+			Times)
+    end.
+
+%% Recursively delete directories
+-spec fold_files(Path :: string(),
+		 Fun :: fun((open | close | point,
+			     file | dir | other,
+			     Name :: string(),
+			     Acc0 :: any()) -> Acc1 :: any()),
+		 AccIn :: any()) -> AccOut :: any().
+fold_files(Path, Fun, AccIn) ->
+    case file:list_dir(Path) of
+	{ok, Files} ->
+	    AccIn1 = Fun(open, dir, Path, AccIn),
+	    AccIn2 = lists:foldl(fun (File, Acc0) ->
+					 fold_files(Path, File, Fun, Acc0)
+				 end,
+				 AccIn1,
+				 Files),
+	    Fun(close, dir, Path, AccIn2);
+	_ ->
+	    Fun(point, other, Path, AccIn)
+    end.
+
+-spec fold_files(Path :: string(),
+		 File :: string(),
+		 Fun :: fun((open | close | point,
+			     file | dir | other,
+			     Name :: string(),
+			     Acc0 :: any()) -> Acc1 :: any()),
+		 AccIn :: any()) -> AccOut :: any().
+fold_files(Path, File, Fun, AccIn) ->
+    FilePath = filename:join(Path, File),
+    case filelib:is_dir(FilePath) of
+        true  ->
+            fold_files(FilePath, Fun, AccIn);
+        false ->
+            case filelib:is_file(FilePath) of
+                true  ->
+                    Fun(point, file, FilePath, AccIn);
+                false ->
+                    Fun(point, other, FilePath, AccIn)
+            end
+    end.    
 
 %% renames and deletes failing are OK
 rotate_backupfile(File, 0) ->

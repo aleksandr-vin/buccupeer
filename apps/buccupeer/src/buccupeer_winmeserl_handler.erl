@@ -77,6 +77,9 @@ handle_event({_, ?WM_DEVICECHANGE, ?DBT_DEVICEREMOVECOMPLETE, _}, State) ->
     {ok, State};
 handle_event({_, ?WM_DEVICECHANGE, ?DBT_DEVICEARRIVAL, _}, State) ->
     ?info("DBT_DEVICEARRIVAL WM_DEVICECHANGE event"),
+    ?debug("Running automatic backup jobs on all matched disks"),
+    JobsResults = buccupeer:run_all(),
+    ?info("Automatic backup jobs completed, results: ~p", [JobsResults]),
     {ok, State};
 handle_event(_Event, State) ->
     {ok, State}.
