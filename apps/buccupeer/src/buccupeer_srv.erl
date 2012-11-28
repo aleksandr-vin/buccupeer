@@ -12,7 +12,7 @@
 
 %% API
 -export([start_link/0, list_disks/0, add_job/1, remove_job/1,
-	 run_jobs/1]).
+	 run_jobs/2, last_result/0]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -22,7 +22,7 @@
 
 -define(SERVER, ?MODULE).
 
--record(state, {}).
+-record(state, {last_result}).
 
 -record(job_run_state, {disk_name,
                         src, dest, copies,
@@ -114,11 +114,14 @@ remove_job(JobRef) ->
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec run_jobs(disk_name()) -> [job_report()] |
+-spec run_jobs(disk_name(), integer() | infinity) -> [job_report()] |
 			       'not-found' |
 			       {error, Error :: any()}.
-run_jobs(DiskName) ->
-    gen_server:call(?SERVER, {run_job, DiskName}).
+run_jobs(DiskName, Timeout) ->
+    gen_server:call(?SERVER, {run_jobs, DiskName}, Timeout).
+
+last_result() ->
+    gen_server:call(?SERVER, last_result).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -152,6 +155,8 @@ init([]) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_call(last_result, _From, #state{last_result = Reply} = State) ->
+    {reply, Reply, State};
 handle_call(list_disks, _From, State) ->
     ?debug("Listing disks", []),
     Disks = list_disks_names(),
@@ -238,7 +243,7 @@ handle_call({remove_job, JobRef}, _From, State) ->
 	    end,
     {reply, Reply, State};
 
-handle_call({run_job, DiskName}, _From, State) ->
+handle_call({run_jobs, DiskName}, _From, State) ->
     ?debug("Trying to run jobs on disk ~s", [DiskName]),
     Reply =
 	case read_disk_info(DiskName) of
@@ -250,9 +255,9 @@ handle_call({run_job, DiskName}, _From, State) ->
 	    DiskInfo ->
 		?info("Disk info found for '~s'", [DiskName]),
 		?debug("Disk info: '~p'", [DiskInfo]),
-		run_jobs_by_disk_info(DiskName, DiskInfo)
+		timer:tc(fun run_jobs_by_disk_info/2, [DiskName, DiskInfo])
 	end,
-    {reply, Reply, State};
+    {reply, Reply, State#state{last_result = {calendar:local_time(), Reply}}};
 
 handle_call(_Request, _From, State) ->
     Reply = ok,
@@ -508,7 +513,7 @@ run_job(State0, 'base-dest') ->
 	{error, _} = E ->
 	    {E, 'base-dest-dir-error'};
 	ok ->
-	    ?debug("Base destination directory exists: ~p", [BaseDest]),
+	    ?info("Base destination directory exists: ~p", [BaseDest]),
 	    run_job(State1, 'backup-dir')
     end;
 
@@ -518,7 +523,7 @@ run_job(State0, 'backup-dir') ->
 	{error, _} = E ->
 	    {E, 'backup-dir-error'};
 	ok ->
-	    ?debug("Backup destination directory exists: ~p", [BackupDir]),
+	    ?info("Backup destination directory exists: ~p", [BackupDir]),
 	    run_job(State1, 'decide-to-backup')
     end;
 
@@ -527,37 +532,38 @@ run_job(State0, 'decide-to-backup') ->
 	{{error, _} = E, _State1} ->
 	    {E, 'decide-to-backup-error'};
         {'not-needed', _State1} ->
-            ?debug("Decided not to backup now"),
+            ?info("Decided not to backup now"),
             {'not-needed', "Decided not to backup now"};
 	{'needed', State1} ->
-	    ?debug("Decided to backup"),
+	    ?info("Decided to backup"),
 	    run_job(State1, 'rotate-copies')
     end;
 
 run_job(State0, 'rotate-copies') ->
-    {BackupDir, State1} = backup_dir(State0),
-    case rotate_backupfile(BackupDir ++ "copy", State1#job_run_state.copies) of
+    {BackupName, State1} = backup_name(State0),
+    case rotate_backupfile(BackupName, State1#job_run_state.copies) of
 	{error, _} = E ->
 	    {E, 'rotate-copies-error'};
 	ok ->
-            ?debug("Backups rotated"),
+            ?info("Backups rotated"),
 	    run_job(State1, 'new-copy')
     end;
 
 run_job(State0, 'new-copy') ->
-    {BackupName, State1} = backup_name(State0),
+    {BackupName, State1} = backup_path(State0),
     Src = State0#job_run_state.src,
     case backupfile(Src, BackupName) of
 	{error, _} = E ->
 	    {E, 'new-copy-error'};
 	{ok, BytesCopied} ->
-            ?debug("New copy saved (~p bytes)", [BytesCopied]),
+            ?info("New copy saved (~p bytes)", [BytesCopied]),
 	    run_job(State1, 'commit')
     end;
 
 run_job(_State0, 'commit') ->
     {ok, 'complete'};
 
+%% Catch-all clause
 run_job(_State0, NotImplemented) ->
     {ok, {'not-implemented', NotImplemented}}.
 
@@ -587,6 +593,10 @@ backup_name(State0) ->
     {BackupDir, State1} = backup_dir(State0),
     {BackupDir ++ "copy", State1}.
 
+backup_path(State0) ->
+    {BackupName, State1} = backup_name(State0),
+    {BackupName ++ "/", State1}.
+
 is_backup_needed(State0) ->
     Src = State0#job_run_state.src,
     case most_last_modified(Src) of
@@ -595,23 +605,23 @@ is_backup_needed(State0) ->
 	    {'not-needed', State0};
 	SrcMostLastModTime ->
 	    {BackupName, State1} = backup_name(State0),
-	    case most_last_modified(BackupName) of
-		undefined ->
-		    ?info("No latest backups found on ~p", [BackupName]),
-		    {'needed', State1};
-		LastBackupMostLastModTime ->
-		    case calendar:time_difference(LastBackupMostLastModTime,
-						  SrcMostLastModTime) of
-			{D, _} when D < 0 ->
-			    ?info("No modification time differences found "
-				  "between source and last backup"),
-			    {'not-needed', State1};
-			_ ->
-			    ?info("Modification time differences found "
-				  "between source and last backup"),
-			    {'needed', State1}
-		    end
-	    end
+            case most_last_modified(BackupName) of
+                undefined ->
+                    ?info("No latest backups found on ~p", [BackupName]),
+                    {'needed', State1};
+                LastBackupMostLastModTime ->
+                    case calendar:time_difference(LastBackupMostLastModTime,
+                                                  SrcMostLastModTime) of
+                        {D, _} when D < 0 ->
+                            ?info("No modification time differences found "
+                                  "between source and last backup"),
+                            {'not-needed', State1};
+                        _ ->
+                            ?info("Modification time differences found "
+                                  "between source and last backup"),
+                            {'needed', State1}
+                    end
+            end
     end.
 
 most_last_modified(Path) ->
@@ -644,7 +654,7 @@ most_last_modified(Path) ->
 			Times)
     end.
 
-%% Recursively delete directories
+%% Recursively fold files and directories
 -spec fold_files(Path :: string(),
 		 Fun :: fun((open | close | point,
 			     file | dir | other,
@@ -662,7 +672,12 @@ fold_files(Path, Fun, AccIn) ->
 				 Files),
 	    Fun(close, dir, Path, AccIn2);
 	_ ->
-	    Fun(point, other, Path, AccIn)
+            case filelib:is_file(Path) of
+                true  ->
+                    Fun(point, file, Path, AccIn);
+                false ->
+                    Fun(point, other, Path, AccIn)
+            end
     end.
 
 -spec fold_files(Path :: string(),
@@ -684,7 +699,7 @@ fold_files(Path, File, Fun, AccIn) ->
                 false ->
                     Fun(point, other, FilePath, AccIn)
             end
-    end.    
+    end.
 
 %% renames and deletes failing are OK
 rotate_backupfile(File, 0) ->
@@ -719,10 +734,25 @@ delete_file_or_dir(File) ->
     end.
 
 backupfile(Src, Dest) ->
-    case file:copy(Src, Dest) of
-        {error, eisdir} ->
-            backupdir(Src, Dest);
-        Other -> Other
+    case filelib:ensure_dir(Dest) of
+        {error, Reason} = E ->
+            ?error("Can't ensure of backup path (~p) presence: ~p", [Dest, Reason]),
+            E;
+        ok ->
+            MayBeFilename =
+                case filelib:is_file(Src) of
+                    true ->
+                        ?debug("Source is a file: ~p", [Src]),
+                        filename:basename(Src);
+                    false ->
+                        ?debug("Source is a directory: ~p", [Src]),
+                        ""
+                end,
+            case file:copy(Src, Dest ++ MayBeFilename) of
+                {error, eisdir} ->
+                    backupdir(Src, Dest);
+                Other -> Other
+            end
     end.
 
 backupdir(Src, Dest) ->
@@ -735,19 +765,30 @@ backupdir(Src, Dest) ->
 %% Recursively copy directories
 -spec recursive_copy(list(), list()) -> ok.
 recursive_copy(From, To) ->
-    {ok, Files} = file:list_dir(From),
-    Log = [rec_copy(From, To, X) || X <- Files],
-    BytesTotal =
-        lists:foldl(fun ({{ok, V}, _Name}, Acc) when is_integer(V) ->
-                            ?debug("Copied ~p bytes: ~p", [V, _Name]),
-                            V + Acc;
-                        ({_Reason, _Name}, Acc) ->
-                            ?debug("Not copied (~p): ~p ", [_Reason, _Name]),
-                            Acc
-                    end,
-                    0,
-                    Log),
-    {{ok, BytesTotal}, From}.
+    case filelib:is_dir(From) of
+        true ->
+            {ok, Files} = file:list_dir(From),
+            Log = [rec_copy(From, To, X) || X <- Files],
+            BytesTotal =
+                lists:foldl(fun ({{ok, V}, _Name}, Acc) when is_integer(V) ->
+                                    ?debug("Copied ~p bytes: ~p", [V, _Name]),
+                                    V + Acc;
+                                ({_Reason, _Name}, Acc) ->
+                                    ?debug("Not copied (~p): ~p ", [_Reason, _Name]),
+                                    Acc
+                            end,
+                            0,
+                            Log),
+            {{ok, BytesTotal}, From};
+        false ->
+            case filelib:is_file(From) of
+                true  ->
+                    ok = filelib:ensure_dir(To),
+                    {file:copy(From, To), From};
+                false ->
+                    {skipped, From}
+            end
+    end.
 
 -spec rec_copy(list(), list(), list()) -> {ok, list()} | {skipped, list()}.
 rec_copy(From, To, File) ->

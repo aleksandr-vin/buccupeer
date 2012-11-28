@@ -48,10 +48,6 @@ content(State) ->
      [body,
       [h1, <<"Buccupeer: локальный бэкап файлов на внешний USB диск">>],
       [hr],
-      [h2, <<"Настройки">>],
-      configuration(State),
-      [hr],
-      [h2, <<"Лог">>],
       log(State)]].
 
 -spec configuration(state()) -> xml:tree().
@@ -75,8 +71,25 @@ configuration(State) ->
 
 -spec log(state()) -> xml:tree().
 log(_) ->
-    [{'div', [{id, log}]},
-     <<"Здесь будут ссылки на лог-файлы">>].
+    [{'div', [{id, log}]}|
+     format_results(buccupeer_srv:last_result())].
+
+format_results({{{Year,Mon,Day},{Hr,Min,Sec}}, {Elapsed, Results}}) ->
+    [
+     [h2, io_lib:format("Последний бэкап был произведен "
+                        "~b-~2..0b-~2..0b ~2..0b:~2..0b:~2..0b", [Year,Mon,Day,Hr,Min,Sec])],
+     [h3, io_lib:format("Затраченное время: ~pс", [Elapsed / 1000000])],
+     [ol | [format_result(X) || X <- Results]]
+     ];
+format_results(undefined) ->
+    [h2, <<"Нет информации о последнем бэкапе">>].
+
+format_result({{job,JobRef},Result,Descr}) ->
+    [{'div', [{id, job_result}]},
+     io_lib:format("Задача #~p: ~p -- ~p", [JobRef, Result, Descr])
+    ];
+format_result([]) ->
+    [].
 
 -type drive_info() :: term().
 
@@ -86,13 +99,7 @@ log(_) ->
 			 {cowboy_req:req(),
 			  Drives :: [{string(), drive_info() | undefined}]}.
 drives_info(Req) ->
-    Fake = {Req,
-	    [{"H:", undefined},
-	     {"Z:", [{note, "My homework backup"},
-		     {backup, [{src, "C:/some-file"},
-			       {copies, 31}]}]}]},
-    ?warning("Not implemented, fake value: ~p", [Fake]),
-    Fake.
+    {Req, buccupeer_srv:list_disks()}.
 
 %% Markup code fragments
 -spec markup(Section :: atom(), Data :: term()) -> xml:tree().

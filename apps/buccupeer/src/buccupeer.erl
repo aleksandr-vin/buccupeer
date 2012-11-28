@@ -17,7 +17,9 @@ stop() ->
 
 run_all() ->
     BackupDisks = buccupeer_srv:list_disks(),
-    JobsResults = [buccupeer_srv:run_jobs(Disk) || {Disk, _} <- BackupDisks],
+    Timeout = infinity,
+    JobsResults = [buccupeer_srv:run_jobs(Disk, Timeout) || {Disk, _} <- BackupDisks],
+    _ = os:cmd("start http://localhost/last-result"),
     JobsResults.
 
 %% ===================================================================
