@@ -36,10 +36,12 @@ Now unplug and plug in this USB drive! Supposing you have a
 be copied to the `backups/buccupeer/copy` directory on your USB drive.
 
 You can also check the result of your last backup by visiting
-http://localhost/last-result, but it is limited in functionality for
-now. Watch the aleksandr-vin/buccupeer repository for improvements and
-contribute too.
+[http://localhost/last-result](http://localhost/last-result), but it
+is limited in functionality for now. Watch the
+[repository](https://github.com/aleksandr-vin/buccupeer) for
+improvements and contribute too.
 
-*PS.* Tried replagging your USB drive again and frustrated of not
- seeing a new fresh backup copy on it? -- Maybe you have no changes in
- you backup job's source?
+**PS.** Tried replagging your USB drive again and frustrated of not
+ seeing a new fresh backup copy on it?
+
+> -- Maybe you have no changes in you backup job's source?
