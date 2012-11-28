@@ -9,6 +9,7 @@
                   compiler,
                   syntax_tools,
                   lager,
+                  cowboy,
                   winmeserl
                  ]},
   {mod, { buccupeer_app, []}},

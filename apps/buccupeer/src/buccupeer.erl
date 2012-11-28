@@ -3,6 +3,8 @@
 %% Application callbacks
 -export([start/0, stop/0, run_all/0]).
 
+-include("log.hrl").
+
 %% ===================================================================
 %% Application callbacks
 %% ===================================================================
@@ -19,7 +21,9 @@ run_all() ->
     BackupDisks = buccupeer_srv:list_disks(),
     Timeout = infinity,
     JobsResults = [buccupeer_srv:run_jobs(Disk, Timeout) || {Disk, _} <- BackupDisks],
-    _ = os:cmd("start http://localhost/last-result"),
+    Cmd = "start http://localhost/last-result",
+    CmdResult = os:cmd(Cmd),
+    ?info("Running '~p' returned: ~p", [Cmd, CmdResult]),
     JobsResults.
 
 %% ===================================================================
