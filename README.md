@@ -7,7 +7,8 @@ buccupeer
 drives periodically and automatically when you plug it.
 
 
-== Use case
+Use case
+--------
 
 Create `.buccupeer` file on your *USB drive* with content like the one
 below:
