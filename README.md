@@ -23,10 +23,10 @@ buccupeer_disk_info.
 ].
 ```
 
-Its meaning is that you want to perform one backup job (to the drive
-with this `.buccupeer` file) copying directory (or file)
-`c:/buccupeer/apps/buccupeer` to `h:/backups/` keeping 5 rotated
-copies.
+Its meaning is that you want to:
+* perform one backup job *(to the drive with this `.buccupeer` file)*
+* copy directory *(or file)* `c:/buccupeer/apps/buccupeer` to `h:/backups/`
+* keep 5 rotated copies of it
 
 Don't mind the drive letter `h:` in *dest* -- it will be replaced on
 the fly.
